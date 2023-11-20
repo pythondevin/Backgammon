@@ -32,7 +32,7 @@ As of right now, the server script really just represents a 'room' i.e. two play
 ```sh
 pip screeninfo
 ```
-You will be notified of a successful installation.
+   You will be notified of a successful installation.
 
 3. Place all three of my python files(client application, board module, and server application) in a directory that Python recognizes, and run server and subsequent clients as scripts on the command line.
 
