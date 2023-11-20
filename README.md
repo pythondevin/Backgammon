@@ -2,7 +2,7 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-[![Product Name Screen Shot][product-screenshot]](https://www.flickr.com/photos/199587573@N06/53344540746/in/dateposted-public/lightbox/)
+[![Devin's Backgammon Game][product-screenshot]](https://www.flickr.com/photos/199587573@N06/53344540746/in/dateposted-public/lightbox/)
 
 This is a fully functional, tournament style Backgammon game in which two clients can connect and play.
 Complete with flawless forced move detection and a simple, yet appealing interface, this is one of the best ways to play online backgammon.
