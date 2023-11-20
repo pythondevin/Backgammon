@@ -354,7 +354,7 @@ class GameHandler(BaseRequestHandler):
             sys.exit()
         
             
-serv = ThreadedTCPServer(('192.168.0.4', 20000), GameHandler)
+serv = ThreadedTCPServer(('localhost', 20000), GameHandler)
 with serv:
     #Seperate thread for server and starts new thread for each request because of ThreadingMixIn class
     server_thread = threading.Thread(target=serv.serve_forever)
