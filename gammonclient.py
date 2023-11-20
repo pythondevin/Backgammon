@@ -392,7 +392,7 @@ def serverListener():
                 summarytext.see('end')
     
     with sock:
-        sock.connect(('192.168.0.4', 20000))
+        sock.connect(('', 20000))
         handle()
     
     #game_thread will call this to kill itself after game loop has broken
