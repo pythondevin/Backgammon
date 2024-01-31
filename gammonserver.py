@@ -178,9 +178,9 @@ class GameHandler(BaseRequestHandler):
                         with gameCondition:
                             gameCondition.wait()
                        
-                            
-                        first_rolls.clear()
-                        client_rolls.clear()
+                        with thread_lock:   
+                            first_rolls.clear()
+                            client_rolls.clear()
                     
                     if username == turn_client:       
                         with gameCondition:
@@ -201,14 +201,14 @@ class GameHandler(BaseRequestHandler):
                                     raise GameError('player has left, must restart')
                     #both threads need to adjust whose turn it is now
                     #also tell other client what the move was
-                    last_move = client_moves[len(client_moves)-1]
+                    with thread_lock:
+                        last_move = client_moves[len(client_moves)-1]
                     if username != turn_client:
                         self.request.sendall(last_move)
                         #only adjust whose turn it is if last move was not a double proposal
                         if last_move != b'double':
                             turn_client = username
                         isOver = self.request.recv(1)
-                        time.sleep(1)
                         #if client tells us game is now over, break from loop
                         #can deal with doubling here!!!
                         if isOver == b'N':
