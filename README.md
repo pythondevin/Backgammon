@@ -20,7 +20,8 @@ This project uses a GUI framework known as Tkinter, which is built-in to Python 
 
 You can easily see how this project works by starting the server script and subsequently starting the client applications, all from the command line.
 These files implement the server to work as a local host, but this can easily be changed by hardcoding an IP address into server and socket instantiations.
-Only one third-party Python module is used (screeninfo), which is can easily be added to newer Python installations.
+Only one third-party Python module is used (screeninfo), which is can easily be added to newer Python installations.  Alternatively, no server is needed
+to play against the computer in one-player mode, in which case firing up gammonclient.py is all that is needed to play.
 
 This project assumes the client has Python on their machine and can use 'pip' calls to download official third-party modules.
 As of right now, the server script really just represents a 'room' i.e. two players playing one session.  As this project grows, these 'rooms' could be the building blocks for a full-scale backgammon service.
