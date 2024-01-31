@@ -283,10 +283,11 @@ class ComputerPlayer():
         
     #this method will set the phase to tell client to end it's gamethread   
     def close(self):
-        
+        self._state = 'ON'
+        self.phase = 23
         with mainCondition:
             mainCondition.notify()
-        self
+        
     
     #socket interface methods that are meaningless to our AI class 
     def __enter__(self):
