@@ -7,6 +7,7 @@
 This is a fully functional, tournament style Backgammon game in which two clients can connect and play.
 Complete with flawless forced move detection and a simple, yet appealing interface, this is one of the best ways to play online backgammon.
 Any backgammon fan could appreciate playing this one and is simple and inviting enough for newbies!
+The newest addition to this project is a computer player the user can play against.
 This project is written in Python.
 
 ### Built With
@@ -34,7 +35,7 @@ pip screeninfo
 ```
    You will be notified of a successful installation.
 
-3. Place all three of my python files(client application, board module, and server application) in a directory that Python recognizes, and run server and subsequent clients as scripts on the command line.
+3. Place all four of my python files(client application, board module, computer player, and server application) in a directory that Python recognizes, and run server and subsequent clients as scripts on the command line.
 
 
 
@@ -46,6 +47,9 @@ show every possibly place that piece can move with the current dice data, and a 
 If a move is "forced", meaning there is only one way to perform a move with a certain roll, the 'Do Forced Move' button will enable itself and the client
 must click this button to proceed.  I'm confident this forced move detection algorithm will detect every possible scenario in which a move is forced.
 Another noteworthy feature is the pip-counter, which always stays updated with pip-counts for both players.
+
+A new addition to this game is the "gammonAI.py" file.  The client composes itself with either a ComputerPlayer or Socket object which represents a one-player
+and online experience, respectively.  Much like the server, a ComputerPlayer object coordinates the events of the game and contains all the logic for it's moves.
 
 Potential issues in developing this project could arise if upscaling for general public to use, due to the possible redesigns in how the server system works,
 however, the game handlers within the server would not need changing (the threads which control the flow of the game.) 
