@@ -2,7 +2,12 @@ from tkinter import *
 from tkinter import ttk
 from screeninfo import get_monitors
 from collections import deque
+from time import sleep
+import threading
+import math
 import copy
+import sys
+import traceback
 
 #will use a fixed size Canvas object to represent the dice
 #will expose a public method for drawing the desired die
@@ -12,12 +17,13 @@ class Dice(Canvas):
         self['height'] = 60
         self['width'] = 60
         self._die_value = None
+        self.dot_size = 3
     #is passed the value of die to display   
     def drawDie(self, val):
         self.set(val)
         HEIGHT = int(self['height'])
         WIDTH = int(self['width'])
-        DOT_SIZE = 3
+        DOT_SIZE = self.dot_size
         UPPER_LEFT_COORDS = HEIGHT/4-DOT_SIZE, WIDTH/4-DOT_SIZE, HEIGHT/4+DOT_SIZE, WIDTH/4+DOT_SIZE
         UPPER_RIGHT_COORDS = HEIGHT/4-DOT_SIZE, WIDTH*(3/4)-DOT_SIZE, HEIGHT/4+DOT_SIZE, WIDTH*(3/4)+DOT_SIZE 
         LOWER_LEFT_COORDS = HEIGHT*(3/4)-DOT_SIZE, WIDTH/4-DOT_SIZE, HEIGHT*(3/4)+DOT_SIZE, WIDTH/4+DOT_SIZE
@@ -39,9 +45,11 @@ class Dice(Canvas):
             self.create_oval(*LOWER_RIGHT_COORDS, fill='black', tags=('dot'))
         elif val == 5:
             self.drawDie(4)
+            self.set(5)
             self.create_oval(*CENTER_COORDS, fill='black', tags=('dot'))
         elif val == 6:
             self.drawDie(4)
+            self.set(6)
             self.create_oval(WIDTH/4-DOT_SIZE, HEIGHT/2-DOT_SIZE, WIDTH/4+DOT_SIZE, HEIGHT/2+DOT_SIZE, fill='black', tags=('dot'))
             self.create_oval(WIDTH*(3/4)-DOT_SIZE, HEIGHT/2-DOT_SIZE, WIDTH*(3/4)+DOT_SIZE, HEIGHT/2+DOT_SIZE, fill='black', tags=('dot'))
             
@@ -71,9 +79,10 @@ class PieceError(GackError):
 #userClickSpot--->highlightSpot--->movePiece--->highlightSpot--->movePiece is basic loop, is restarted when user clicks on a different spot/piece or no more moves to be made
 class BackgammonBoard(Canvas):
     #instantiate BackgammonBoard with parent, colors of board, and client's Confirm move button, forced move button, and doubling method
-    def __init__(self, parent, colors, b, b2, doubling_method):
+    def __init__(self, parent, colors, b, b2, doubling_method, lock, animate=True):
         #create a Canvas object with super() call
         super().__init__(parent, background=colors[0])
+        self.root = parent
         #save colors as instance variable for future configuration
         self._colors = list(colors)
         #save client confirm and forced move buttons as instance variables
@@ -81,6 +90,10 @@ class BackgammonBoard(Canvas):
         self.button_2 = b2
         #save client's doubling method
         self.client_method = doubling_method
+        #will notify client after every move is performed
+        self.game_lock = lock
+        #internal lock board will use to put all bar pieces on bar before original move is performed
+        self.board_lock = threading.Condition()
         #create dictionary to hold spot number and pieces currently occupying it
         self._piece_locations = {i:[] for i in range(0,27)}
         #create the dice instance data, will have mutator method (setDice())
@@ -95,6 +108,11 @@ class BackgammonBoard(Canvas):
         #initialize pipcount variables as strings (for Tkinter)
         self.team_pipcount = '167'
         self.opp_pipcount = '167'
+        #detirmine if a drawing thread is running and make other moves wait to ensure animation of one piece at a time
+        self.active_thread = False
+        self.draw_cond = threading.Condition()
+        self._animate = animate
+        self.is_forced_move = None
         #draw an empty backgammon board
         self._drawBoard()
         
@@ -145,7 +163,6 @@ class BackgammonBoard(Canvas):
         self._coords = [(x1, BOTTOM_BORDER, x2, BOTTOM_BORDER, (x2-x1)//2+x1, BOTTOM_HEIGHT) for x1, x2 in _spot_x_coords] + [(x1, TOP_BORDER, x2, TOP_BORDER, (x2-x1)//2+x1, TOP_HEIGHT) for x1, x2 in reversed(_spot_x_coords)]
         self._diameter = x_coords[2] - x_coords[0]
         self._trough_distance = X_TROUGH_DISTANCE
-        print(self._coords)
         
         colors = self._colors
         #id numbers of all spots reflect actual numbering on backgammon board (from bottom-right homeboard perspective)
@@ -333,7 +350,8 @@ class BackgammonBoard(Canvas):
         if spot_idx == 0 or spot_idx == 25:
             print('clicked on trough')
             return
-            
+        
+        #give highlight calls same amount of lag as the call in movePiece    
         self._highlightSpot(spot_idx, bar_count)
             
                              
@@ -342,10 +360,12 @@ class BackgammonBoard(Canvas):
     #is passed index that piece moves from and optional arg for amount of team pieces on the bar
     #bar_pieces arg will implment correct placement of pieces from bar back to the board 
     #is_counting optional arg will indicate whether _highlightSpot is just being used to count number of available moves       
-    def _highlightSpot(self, idx, bar_pieces=None, is_counting=False):  
-        #if no pieces remain on spot, do nothing
-        if len(self._piece_locations[idx]) == 0 or (bar_pieces == 0 and idx == 26):
-            return
+    def _highlightSpot(self, idx, bar_pieces=None, is_counting=False):
+                    
+        self._clearSpots()
+        #if no pieces remain on spot, do nothing or game is over
+        if len(self._piece_locations[idx]) == 0 or (bar_pieces == 0 and idx == 26) or self.isGameOver():
+            return None, None, None, None, None
         #check if all team pieces are in homeboard
         #iterate through _piece_locations depending on orientation of homeboard (bl or br) and count all team pieces outside of user's homeboard
         #start the count at how many pieces user already has in their trough! very important for correct count of pieces in homeboard
@@ -646,6 +666,7 @@ class BackgammonBoard(Canvas):
                     self.addtag('validspot5', 'withtag', self._piece_locations[light_idx_5][4][0])
                     self.dtag(self._piece_locations[light_idx_5][4][0], 'piece'+str(light_idx_5))
                     self.itemconfigure(self._piece_locations[light_idx_5][4][0], outline=ol)
+                            
                     
                
     #change color of board elements, represented by _colors instance variable
@@ -681,7 +702,25 @@ class BackgammonBoard(Canvas):
                        
         self._colors[idx] = newcolor
         
-              
+    #generator that yields tuples representing all moves that can be made with current dice data
+    def countMoves(self, bar_count=0):
+        #yield moves from pieces on bar one at a time until no more team pieces on bar detected
+        if bar_count != 0:
+            yield 26, self._highlightSpot(26, is_counting=True)
+        else:
+            for key, value in self._piece_locations.items():
+                if len(value) > 0 and value[0][1] == self._team:
+                    yield key, self._highlightSpot(key,is_counting=True)
+                    
+    #count number of dice currently active           
+    def countDice(self):
+        count = 0
+        for d in (self._dice_1, self._dice_2, self._dice_3, self._dice_4):
+            if d is not None:
+                count += 1 
+                
+        return count
+             
     #mutator method for setting current dice roll data into BackgammonBoard
     #always assigns the higher die to self._dice_1 variable
     #will detect if roll results in a forced move
@@ -697,26 +736,12 @@ class BackgammonBoard(Canvas):
             is_doubles = True
         
         print('dice values has been set to:', self._dice_1, self._dice_2, self._dice_3, self._dice_4)   
-        #generator that yields tuples representing all moves that can be made with current dice data
-        def countMoves(bar_count=0):
-            #yield moves from pieces on bar one at a time until no more team pieces on bar detected
-            if bar_count != 0:
-                yield 26, self._highlightSpot(26, is_counting=True)
-            else:
-                for key, value in self._piece_locations.items():
-                    if len(value) > 0 and value[0][1] == self._team:
-                        yield key, self._highlightSpot(key,is_counting=True)
-        
-        #count number of dice currently active           
-        def countDice():
-            count = 0
-            for d in (self._dice_1, self._dice_2, self._dice_3, self._dice_4):
-                if d is not None:
-                    count += 1 
-                    
-            return count
-        
-        
+        #turn off animation for the duration of the method if it was on in the first place
+        turn_back_on = False
+        if self._animate is True:
+            self._animate = False
+            turn_back_on = True
+
         #look at all possible moves with this roll
         loop_counter = 0
         move_count = 0
@@ -734,6 +759,7 @@ class BackgammonBoard(Canvas):
         _is_alternatives = False
         two_indices_cond = False
         set_to_null = None
+        move_list = []
         while(True):
             #testing code (for breaking erronous infinite loop)
             if loop_counter == 200:
@@ -746,9 +772,8 @@ class BackgammonBoard(Canvas):
                     bar_p += 1
                   
             #step through our generator and store all moves that can be made with current dice data
-            move_list = []
-            active_dice = countDice()
-            for f, ml in countMoves(bar_p):
+            active_dice = self.countDice()
+            for f, ml in self.countMoves(bar_p):
                 for d, m in enumerate(ml, 1):
                     if m is not None:
                         #turn our actual_idx into light_idx value
@@ -767,11 +792,12 @@ class BackgammonBoard(Canvas):
                                 extra_pieces = 2
                         move_count += (1 if is_doubles is False else extra_pieces)
                         
-            #potential upgrade, if test is True, then immediately return self.is_forced_move
             if move_count > 0:
                 loop_count += 1
                 #if just a test, tell caller we can move
                 if test is True:
+                    if turn_back_on is True:
+                        self._animate = True
                     return True
                 
             loop_counter += 1  
@@ -779,204 +805,201 @@ class BackgammonBoard(Canvas):
             print('loop_count', loop_count)
             #if these conditions are met, is possibly a forced move
             #will move every possible combination of choices to see if it really is a forced move
-            if move_count <= 4:
-                #move will be considered forced until proven otherwise
-                _is_forced_move = True
-                moves = len(move_list)
-                #analyze time zero conditions if more moves than dice, see if we know move isn't forced, analyze further if could still be a forced move
-                if active_dice < move_count and loop_count == 1:
-                    print('here at our suite!')
-                    #check that all dice are used in the move_list (for non-double rolls)
-                    all_dice = None
-                    if is_doubles is False:
-                        d1, d2 = False, False
-                        for m in move_list:
-                            if m[3] == 1:
-                                d1 = True
-                            elif m[3] == 2:
-                                d2 = True
-                                
-                        if d1 is True and d2 is True:
-                            all_dice = True
-                        else:
-                            all_dice = False
-                    
-                    #many indices use one die, analyze further to make sure we can't find way to use other die, and flag potential unusable die       
-                    if all_dice is False:
-                        print('non-forced move because lots indices can move one die')
-                        two_indices_cond = True
-                        set_to_null = 1 if move_list[0][3] == 2 else 2       
-                    #if only one piece can be moved with all moves of a non-double roll, is only forced if there are no potential opponent pieces
-                    #to put on the bar
-                    elif move_count == 3 and is_doubles is False and move_list[0][0] == move_list[1][0] and \
-                    move_list[1][0] == move_list[2][0]:
-                        if (len(self._piece_locations[move_list[0][1]]) == 1 and self._piece_locations[move_list[0][1]][0][1] == self._opponent)\
-                         or (len(self._piece_locations[move_list[1][1]]) == 1 and self._piece_locations[move_list[1][1]][0][1] == self._opponent):
-                            print('our choice detection suite!')
-                            _is_forced_move = False
-                            break
-                    #three moves with no double could still be forced, only from first loop_count
-                    elif move_count == 3 and is_doubles is False:
-                        print('must analyze for potential forced moves')
-                        pass  
-                    #make sure all dice can be used if move_count is greater than 3, or doubles is True
-                    elif is_doubles is True or all_dice is True:   
-                        _is_forced_move = False
-                        break 
+            
+            #move will be considered forced until proven otherwise
+            _is_forced_move = True
+            moves = len(move_list)
+            #analyze time zero conditions if more moves than dice, see if we know move isn't forced, analyze further if could still be a forced move
+            if active_dice < move_count and loop_count == 1:
+                #check that all dice are used in the move_list (for non-double rolls)
+                all_dice = None
+                if is_doubles is False:
+                    d1, d2 = False, False
+                    for m in move_list:
+                        if m[3] == 1:
+                            d1 = True
+                        elif m[3] == 2:
+                            d2 = True
+                            
+                    if d1 is True and d2 is True:
+                        all_dice = True
                     else:
-                        print('none of the criteria was met, must analyze for potential forced moves')
-                #if we get past time zero and still have more moves than dice, and also doubles is active or multiple piece-one die is not active     
-                elif active_dice < move_count:
-                    if is_doubles is True or two_indices_cond is False:
-                        _is_forced_move = False
-                        break 
+                        all_dice = False
                 
-                #two indices can only move one die, set our flag so if second move not found, we will set unusable die to null   
-                elif loop_count == 1 and is_doubles is False and moves == 2 and move_list[0][3] == move_list[1][3]:
-                    print('non-forced move because two indices can move one die')
+                #many indices use one die, analyze further to make sure we can't find way to use other die, and flag potential unusable die       
+                if all_dice is False:
+                    print('non-forced move because lots indices can move one die')
                     two_indices_cond = True
-                    set_to_null = 1 if move_list[0][3] == 2 else 2
-                        
-                #no more moves detected, look for previous 'forks', and restore data back to that point        
-                if moves == 0:
-                    print('no move_list break')
-                    #these suites will detect alternate forced moves (non-double rolls) 
-                    if is_doubles is False and countDice() == 0 and len(self._last_move) > 1:   
-                        if _is_alternatives is False:
-                            _is_alternatives = None
-                        elif _is_alternatives is None:
-                            #if two same moves are performed in reverse order, or one piece goes two different ways to one index
-                            if (self._last_move[0][:2], self._last_move[1][:2]) == (self.forced_moves[1][:2], self.forced_moves[0][:2]) or \
-                            (self.forced_moves[0][0] == self.forced_moves[1][1] and self._last_move[0][0] == self._last_move[1][1]):
-                                print('not actually alternative forced move')
-                            else:
-                                print('alternative forced moves have been detected')
-                                _is_alternatives = True
-                            
-                            print('pertinent data:', self._last_move, self.forced_moves)
-                    
-                    #if all dice are used, store this sequence of moves, which will implement all dice must be used       
-                    if countDice() == 0:
-                        self.forced_moves = self._last_move
-                        self.forced_moves = copy.deepcopy(self.forced_moves)
-                         
-                    print('len(fork_list):', len(fork_list))
-                    if len(fork_list) > 0:
-                        idx_adjust_l += 1
-                        move_count = 0
-                        #restore data back to first detected fork
-                        fork_data = fork_list[0]
-                        current_fork = fork_data[2]
-                        copy_fork_size = fork_data[1]
-                        lc = loop_count
-                        if _already_tried is False: 
-                            print('fork_list before pop:')
-                            for data in fork_list:
-                                print(data, end=' ')
-                            print('\n')
-                            popped_fork = fork_list[0][0]  
-                            for i in range(lc, fork_list.popleft()[0]-1, -1):
-                                 self._undo() 
-                                 loop_count -= 1    
-                        #we've searched through all roads in fork, time to look for previous forks (if any) and store extra forks in our mult_fork_lists for future analysis
-                        if _already_tried is True:
-                            print('here within the _already_tried suite')
-                            lc = loop_count 
-
-                            if len(fork_list) > 0:
-                                for i in range(lc, prev_fork[0]-1, -1):
-                                    self._undo()
-                                    loop_count -= 1 
-                                data = fork_list.popleft()    
-                                idx_adjust_l = data[3]
-                                search_fork = data[2]
-                                search_loop = data[0]
-                                current_fork = prev_fork[2]
-                                popped_fork = prev_fork[0]
-                                if len(fork_list) > 0:
-                                    print('adding to our mult_fork_list now')
-                                    mult_fork_lists.append((prev_fork, fork_list.copy()))
-                            else:   
-                                idx_adjust_l = 1
-                            fork_list.clear()
-                        elif idx_adjust_l == copy_fork_size:
-                            _already_tried = True
-                            prev_fork = fork_data
-                            
-                    elif len(mult_fork_lists) > 0:
-                        print('mult_fork_lists:', mult_fork_lists)
-                        lc = loop_count
-                        data = mult_fork_lists.popleft()
-                        data2 = data[1].popleft()
-                        for i in range(lc, data[0][0]-1, -1):
-                            self._undo()
-                            loop_count -= 1
-                        idx_adjust_l = data2[3]
-                        search_fork = data2[2]
-                        search_loop = data2[0]
-                        current_fork = data[0][2]
-                        popped_fork = data[0][0]
-                        if len(data[1]) > 0:
-                            mult_fork_lists.append((data[0], data[1]))
-                        
-                               
-                    else:
-                        print('no alternative break')
-                        #if multiple forced moves detected, then move is not actually forced
-                        if _is_alternatives is True:
-                            _is_forced_move = False 
-                            
+                    set_to_null = 1 if move_list[0][3] == 2 else 2       
+                #if only one piece can be moved with all moves of a non-double roll, is only forced if there are no potential opponent pieces
+                #to put on the bar
+                elif move_count == 3 and is_doubles is False and move_list[0][0] == move_list[1][0] and \
+                move_list[1][0] == move_list[2][0]:
+                    if (len(self._piece_locations[move_list[0][1]]) == 1 and self._piece_locations[move_list[0][1]][0][1] == self._opponent)\
+                     or (len(self._piece_locations[move_list[1][1]]) == 1 and self._piece_locations[move_list[1][1]][0][1] == self._opponent):
+                        print('our choice detection suite!')
+                        _is_forced_move = False
                         break
-                #moves can be made
-                elif moves > 0:
-                    #adjuster will change depending if we are analyzing a different index in current fork
-                    adjuster = 1
-                    #more than one option, store in fork_list for future analysis (if necessary)
-                    if moves > 1:
-                        print('current_fork:', current_fork)
-                        print('search_fork:', search_fork, search_loop)
-                        #if this is fork we are currently analyzing, then use our index adjuster
-                        fork_exception = False
-                        if move_list == current_fork:
-                            if loop_count == popped_fork:
-                                adjuster = idx_adjust_l
-                            if _already_tried is False:
-                                if loop_count == popped_fork:
-                                    fork_list.appendleft((loop_count, moves, move_list, idx_adjust_l))
-                                else:
-                                    if search_loop is None or loop_count > search_loop:
-                                        print('exception1')
-                                        fork_exception = True
-                            elif loop_count != popped_fork and (search_loop is None or loop_count > search_loop):
-                                print('exception2')
-                                fork_exception = True
-                            
-                        if current_fork is None or (move_list == search_fork and loop_count == search_loop):
-                            idx_adjust_l = 2 if move_list == search_fork else 1
+                #three moves with no double could still be forced, only from first loop_count
+                elif move_count == 3 and is_doubles is False:
+                    print('must analyze for potential forced moves')
+                    pass  
+                #make sure all dice can be used if move_count is greater than 3, or doubles is True
+                elif is_doubles is True or all_dice is True:   
+                    _is_forced_move = False
+                    break 
+                else:
+                    print('none of the criteria was met, must analyze for potential forced moves')
+            #if we get past time zero and still have more moves than dice, and also doubles is active or multiple piece-one die is not active     
+            elif active_dice < move_count:
+                if is_doubles is True or two_indices_cond is False:
+                    _is_forced_move = False
+                    break 
+            
+            #two indices can only move one die, set our flag so if second move not found, we will set unusable die to null   
+            elif loop_count == 1 and is_doubles is False and moves == 2 and move_list[0][3] == move_list[1][3]:
+                print('non-forced move because two indices can move one die')
+                two_indices_cond = True
+                set_to_null = 1 if move_list[0][3] == 2 else 2
+                    
+            #no more moves detected, look for previous 'forks', and restore data back to that point        
+            if moves == 0:
+                print('no move_list break')
+                #these suites will detect alternate forced moves (non-double rolls) 
+                if is_doubles is False and self.countDice() == 0 and len(self._last_move) > 1:   
+                    if _is_alternatives is False:
+                        _is_alternatives = None
+                    elif _is_alternatives is None:
+                        #if two same moves are performed in reverse order, or one piece goes two different ways to one index
+                        if (self._last_move[0][:2], self._last_move[1][:2]) == (self.forced_moves[1][:2], self.forced_moves[0][:2]) or \
+                        (self.forced_moves[0][0] == self.forced_moves[1][1] and self._last_move[0][0] == self._last_move[1][1]):
+                            print('not actually alternative forced move')
+                        else:
+                            print('alternative forced moves have been detected')
+                            _is_alternatives = True
+                        
+                
+                #if all dice are used, store this sequence of moves, which will implement all dice must be used       
+                if self.countDice() == 0:
+                    self.forced_moves = self._last_move
+                    self.forced_moves = copy.deepcopy(self.forced_moves)
+                     
+                print('len(fork_list):', len(fork_list))
+                if len(fork_list) > 0:
+                    idx_adjust_l += 1
+                    move_count = 0
+                    #restore data back to first detected fork
+                    fork_data = fork_list[0]
+                    current_fork = fork_data[2]
+                    copy_fork_size = fork_data[1]
+                    lc = loop_count
+                    if _already_tried is False: 
+                        print('fork_list before pop:')
+                        for data in fork_list:
+                            print(data, end=' ')
+                        print('\n')
+                        popped_fork = fork_list[0][0]  
+                        for i in range(lc, fork_list.popleft()[0]-1, -1):
+                             self._undo() 
+                             loop_count -= 1    
+                    #we've searched through all roads in fork, time to look for previous forks (if any) and store extra forks in our mult_fork_lists for future analysis
+                    if _already_tried is True:
+                        print('here within the _already_tried suite')
+                        lc = loop_count 
+
+                        if len(fork_list) > 0:
+                            for i in range(lc, prev_fork[0]-1, -1):
+                                self._undo()
+                                loop_count -= 1 
+                            data = fork_list.popleft()    
+                            idx_adjust_l = data[3]
+                            search_fork = data[2]
+                            search_loop = data[0]
+                            current_fork = prev_fork[2]
+                            popped_fork = prev_fork[0]
+                            if len(fork_list) > 0:
+                                print('adding to our mult_fork_list now')
+                                mult_fork_lists.append((prev_fork, fork_list.copy()))
+                        else:   
+                            idx_adjust_l = 1
+                        fork_list.clear()
+                    elif idx_adjust_l == copy_fork_size:
+                        _already_tried = True
+                        prev_fork = fork_data
+                        
+                elif len(mult_fork_lists) > 0:
+                    print('mult_fork_lists:', mult_fork_lists)
+                    lc = loop_count
+                    data = mult_fork_lists.popleft()
+                    data2 = data[1].popleft()
+                    for i in range(lc, data[0][0]-1, -1):
+                        self._undo()
+                        loop_count -= 1
+                    idx_adjust_l = data2[3]
+                    search_fork = data2[2]
+                    search_loop = data2[0]
+                    current_fork = data[0][2]
+                    popped_fork = data[0][0]
+                    if len(data[1]) > 0:
+                        mult_fork_lists.append((data[0], data[1]))
+                    
+                           
+                else:
+                    print('no alternative break')
+                    #if multiple forced moves detected, then move is not actually forced
+                    if _is_alternatives is True:
+                        _is_forced_move = False 
+                        
+                    break
+            #moves can be made
+            elif moves > 0:
+                #adjuster will change depending if we are analyzing a different index in current fork
+                adjuster = 1
+                #more than one option, store in fork_list for future analysis (if necessary)
+                if moves > 1:
+                    print('current_fork:', current_fork)
+                    print('search_fork:', search_fork, search_loop)
+                    #if this is fork we are currently analyzing, then use our index adjuster
+                    fork_exception = False
+                    if move_list == current_fork:
+                        if loop_count == popped_fork:
                             adjuster = idx_adjust_l
-                            _already_tried = True if idx_adjust_l == len(move_list) else False
-                            search_fork = None
-                            current_fork = move_list
-                            if _already_tried is False:
+                        if _already_tried is False:
+                            if loop_count == popped_fork:
                                 fork_list.appendleft((loop_count, moves, move_list, idx_adjust_l))
                             else:
-                                prev_fork = (loop_count, moves, move_list, idx_adjust_l) 
-                        elif (current_fork != move_list and search_fork is None) or fork_exception is True:
-                            print('here my theory is true')
-                            fork_list.append((loop_count, moves, move_list, idx_adjust_l))
+                                if search_loop is None or loop_count > search_loop:
+                                    print('exception1')
+                                    fork_exception = True
+                        elif loop_count != popped_fork and (search_loop is None or loop_count > search_loop):
+                            print('exception2')
+                            fork_exception = True
                         
+                    if current_fork is None or (move_list == search_fork and loop_count == search_loop):
+                        idx_adjust_l = 2 if move_list == search_fork else 1
+                        adjuster = idx_adjust_l
+                        _already_tried = True if idx_adjust_l == len(move_list) else False
+                        search_fork = None
+                        current_fork = move_list
+                        if _already_tried is False:
+                            fork_list.appendleft((loop_count, moves, move_list, idx_adjust_l))
+                        else:
+                            prev_fork = (loop_count, moves, move_list, idx_adjust_l) 
+                    elif (current_fork != move_list and search_fork is None) or fork_exception is True:
+                        print('here my theory is true')
+                        fork_list.append((loop_count, moves, move_list, idx_adjust_l))
+                    
+        
+                #make the move to see if any other options open up afterwards
+                print('idx_adjust_l:', idx_adjust_l) 
+                print('adjuster:', adjuster)
+                index = len(move_list)-adjuster
+                print('movePiece args:', move_list[index])
+                self.movePiece(*move_list[index], col=self._team, pipcount=False, highlight=False)
+                move_count = 0
             
-                    #make the move to see if any other options open up afterwards
-                    print('idx_adjust_l:', idx_adjust_l) 
-                    print('adjuster:', adjuster)
-                    index = len(move_list)-adjuster
-                    print('movePiece args:', move_list[index])
-                    self.movePiece(*move_list[index], col=self._team, pipcount=False, highlight=False)
-                    move_count = 0
-            #plenty of moves can be made, is not a forced move      
-            else:
-                _is_forced_move = False
-                break
+            #clear this list after every iteration
+            move_list.clear()
         
         #put all previous moves used into an instance variable if roll results in a forced move 
         if _is_forced_move is True: 
@@ -1001,6 +1024,8 @@ class BackgammonBoard(Canvas):
                     self._forcedMove()
                     print('performed _forcedMove()')
                 else:
+                    if turn_back_on is True:
+                        self._animate = True
                     return False
                 
                 self.forced_moves = copy.deepcopy(self.forced_moves)
@@ -1008,21 +1033,28 @@ class BackgammonBoard(Canvas):
             
         if _is_forced_move is False:
             self.is_forced_move = False 
+            #save list of all possible moves if move is not forced
+            self.potentials = move_list.copy()
+            #save list of moves we used to arrive to this point (if any)
+            self.before_potentials = copy.deepcopy(self._last_move)
         
         #undo any moves made while looking for forced moves  
         while len(self._last_move) > 0:
             self._undo()
-            print('forced move list:', self.forced_moves)
         
         #if move is not forced but only one die can be used, we set the unusable die to null because confirm button is enabled
         #from all dice being null   
         if set_to_null is not None:
             print('setting unusable die to null')
+            self._dice_3, self._dice_4 = None, None
             if set_to_null == 1:
                 self._dice_1 = None
             else:
                 self._dice_2 = None
-                
+        
+        if turn_back_on is True:
+            self._animate = True
+        self.is_double = is_doubles       
         dice_data = self._dice_1, self._dice_2, self._dice_3, self._dice_4     
         print('current dice data:', dice_data)
         print('is forced move?:', self.is_forced_move)
@@ -1067,7 +1099,7 @@ class BackgammonBoard(Canvas):
         col = self._piece_locations[idx][0][1] if color is None else color
         #throw an Exception if spot has no pieces occupying it
         if len(self._piece_locations[idx]) == 0:
-            raise PieceError('No pieces located at this index')
+            raise PieceError('No pieces located at this index:', idx)
         #handling removing a piece from a spot
         if idx < 25 and idx > 0:
             if len(self._piece_locations[idx]) > 5:
@@ -1113,6 +1145,7 @@ class BackgammonBoard(Canvas):
     #move a piece(s) to a trough
     #trough arg will signify which trough to place the piece into (br or bl) and color of piece must be supplied as arg
     def _moveToTrough(self, color, trough):
+        print('moving to trough, args:', color, trough)
         if color == self._opponent and trough == self._homeboard:
             raise PieceError('cannot wrong team piece into trough')
         
@@ -1177,7 +1210,8 @@ class BackgammonBoard(Canvas):
                 new_labels = [self.labels[i] for i in range(12, 24)] + [self.labels[i] for i in range(0, 12)]
                 self.labels = new_labels  
                 self._spotid = [27] + [i for i in range(13, 25)] + [i for i in range(1, 13)] + [28,29]
-            
+        
+        print(self._coords)   
         #set up variables for highlighting our spots/pieces in the game
         self.actual_idx_1 = None
         self.actual_idx_2 = None
@@ -1255,106 +1289,180 @@ class BackgammonBoard(Canvas):
     #all methods used inside this method adjusts _piece_locations
     #optional color arg to indicate which color to remove from the bar 
     #will throw a PieceError if moving to invalid spot
-    def movePiece(self, f, t, count=1, dice=None, col=None, barPieces=None, pipcount=True, highlight=True):
-        #unhighlight all pieces/spots before a piece is moved
-        self._clearSpots() 
-        #move forced intermediate opponent pieces to bar if multiple dice are used
-        if barPieces is not None:
-            for idx in barPieces:
-                if idx != -1:
-                    self.movePiece(idx, 26, pipcount=False)
-                        
-        
-        #move piece from one index to another(f to t)
-        #every method movePiece uses adjusts self._piece_locations accordingly
-        for i in range(0, count):
-            c = self._removePiece(f, color=col if col is not None else None)
-            if t > 0 and t < 25:
-                #if one opponent piece on destination spot, move enemy piece to bar first
-                if len(self._piece_locations[t]) == 1 and self._piece_locations[t][0][1] != c:
-                    self.movePiece(t,26, pipcount=False)
-                    #store pieces that user moves to bar when no barPieces variable is present (so it can potentially be undone)
-                    if barPieces is None:
-                        barPieces = []
-                    barPieces.append(t)
+    def movePiece(self, f, t, count=1, dice=None, col=None, barPieces=None, pipcount=True, highlight=True, barAnalysis=True):
+        def doMove(fr=f, to=t, cou=count, d=dice, co=col, bar=barPieces, pip=pipcount, high=highlight, barAna=barAnalysis):
+            if self.active_thread is True:
+                with self.board_lock:
+                    self.board_lock.wait()
                     
-                self._addPiece(t, c, count=1)
-            elif t == 26:
-                self._moveToBar(c) 
-            elif t == 25 or t == 0:
-                self._moveToTrough(c, trough='br' if t == 0 else 'bl')
-            else:
-                raise PieceError('non-existant piece location index') 
-            
-        #store dice data before altering it in next suites so move can potentially be undone
-        dice_state = self._dice_1, self._dice_2, self._dice_3, self._dice_4
-        
-        #movePiece has to know which die is being used so it can be set to null for next user click 
-        #these conditions work for regular rolls and doubles
-        if dice == 1:
-            if self._dice_4 is None and self._dice_3 is not None:
+            if self._animate is True:
+                self.active_thread = True
+            #unhighlight all pieces/spots before a piece is moved
+            if d is not None:
+                self._clearSpots() 
+            #move piece from one index to another(f to t)
+            #every method movePiece uses adjusts self._piece_locations accordingly
+            #function will return what color pieces on the spot are
+            operation, piece_count, bar_cond, end_coord = None, None, None, None
+            for i in range(0,cou):
+                c = self._piece_locations[fr][0][1] if co is None else co
+                if self._animate is True:   
+                    operation, piece_count, bar_cond, end_coord = self._animateMove(fr,to,pc=c,hl=high)
+                else:
+                    self._removePiece(fr,c)
+                    if to == 26:
+                        self._moveToBar(c)
+                    elif to == 0 or to == 25:
+                        self._moveToTrough(c, 'br' if to == 0 else 'bl')
+                            
+                      
+                if to > 0 and to < 25:
+                    #if one opponent piece on destination spot, move enemy piece to bar 
+                    found_piece = False
+                    opp_color = self._opponent if c == self._team else self._team
+                    #these conditions reflect that a non animated move can absolutely not have a wrong colored piece on a spot that _addPiece is called on
+                    print('here at pertinent data:', len(self._piece_locations[to]), c)
+                    if len(self._piece_locations[to]) == 1 and (self._piece_locations[to][0][1] != c) and barAna is True:
+                        #store pieces that user moves to bar when no barPieces variable is present (so it can potentially be undone)
+                        if bar is None:
+                            bar = []
+                            bar.append(to)
+                        #move the piece to bar right away for non-animated version of board or _addPiece call will throw a PieceException
+                        if self._animate is False:
+                            self.movePiece(to,26, pipcount=False)
+                            
+                    if self._animate is False:
+                        self._addPiece(to, c) 
+                        
+                if operation == 'addPiece' or operation == 'moveToBar':
+                    if piece_count < 5 or operation == 'moveToBar':
+                        piece = self.create_oval(*end_coord, fill=c, outline='black', tags=(c, 'piece'+str(to)))
+                        self.tag_bind('piece'+str(to), '<1>', self._userClickSpot)
+                        print('bar_cond:', bar_cond)
+                        if bar_cond is False:
+                            self._piece_locations[to].append((piece, c))
+                        else:
+                            self._piece_locations[to].insert(0,(piece,c))
+                    #update label above spot if amount of pieces is 5 or more
+                    else:
+                        self.labels[to-1]['text'] = f'+{len(self._piece_locations[to]) - 4}'
+                        #0 will represent extra pieces on a spot (over 5)
+                        self._piece_locations[to].append(('0', '0')) 
+                        
+                elif operation == 'moveToTrough':
+                    id = self.create_rectangle(*end_coord, fill=c, outline='black', tags=(c))
+                    self._piece_locations[to].append((id, c))                        
+                    print('barPieces:', bar, 'move:', fr, to)      
+                     
+                #move forced intermediate opponent pieces to bar if multiple dice are used
+                if bar is not None:
+                    bar.reverse()
+                    for idx in bar:
+                        if idx != -1:
+                            #if animation is False, then we won't move piece to bar if it's on the place we landed since we already removed it in previous suite
+                            if self._animate is True or (self._animate is False and idx != to):
+                                self.movePiece(idx, 26, col=opp_color, pipcount=False)
+                                if self._animate is True:
+                                    #will wait here until bar piece animations are done
+                                    with self.board_lock:
+                                        self.board_lock.notify()
+                                        self.board_lock.wait()
+                                        
+            #store dice data before altering it in next suites so move can potentially be undone
+            dice_state = self._dice_1, self._dice_2, self._dice_3, self._dice_4
+            #movePiece has to know which die is being used so it can be set to null for next user click 
+            #these conditions work for regular rolls and doubles
+            if d == 1:
+                if self._dice_4 is None and self._dice_3 is not None:
+                    self._dice_1 = self._dice_3
+                    self._dice_3 = None
+                elif self._dice_3 is None and (self._dice_1 == self._dice_2):
+                    self._dice_1 = self._dice_2
+                    self._dice_2 = None
+                else:
+                    self._dice_1 = self._dice_4
+                    self._dice_4 = None
+            elif d == 2:
+                if self._dice_2 is not None:
+                    self._dice_2 = None
+                else:
+                    self._dice_1 = None
+            elif d == 3:
                 self._dice_1 = self._dice_3
-                self._dice_3 = None
-            elif self._dice_3 is None:
-                self._dice_1 = self._dice_2
-                self._dice_2 = None
-            else:
-                self._dice_1 = self._dice_4
+                self._dice_2 = self._dice_4
                 self._dice_4 = None
-        elif dice == 2:
-            if self._dice_2 is not None:
-                self._dice_2 = None
-            else:
-                self._dice_1 = None
-        elif dice == 3:
-            self._dice_1 = self._dice_3
-            self._dice_2 = self._dice_4
-            self._dice_4 = None
-            self._dice_3 = None
-        #for doubles
-        elif dice == 4:
-            if self._dice_4 is not None:
-                self._dice_2 = None
                 self._dice_3 = None
-                self._dice_4 = None
-            else:
+            #for doubles
+            elif d == 4:
+                if self._dice_4 is not None:
+                    self._dice_2 = None
+                    self._dice_3 = None
+                    self._dice_4 = None
+                else:
+                    self._dice_1 = None
+                    self._dice_2 = None
+                    self._dice_3 = None
+                    
+            elif d == 5:
                 self._dice_1 = None
                 self._dice_2 = None
                 self._dice_3 = None
+                self._dice_4 = None
                 
-        elif dice == 5:
-            self._dice_1 = None
-            self._dice_2 = None
-            self._dice_3 = None
-            self._dice_4 = None
+            #adjust user and opponent pip counts only if our flag to perform calculation is True
+            if pip is True:
+                #only perform calculation on last move to prevent unneccessary pip calculations
+                if (self._dice_1, self._dice_2, self._dice_3, self._dice_4) == (None, None, None, None) or self.is_forced_move is True:
+                    self.team_pipcount, self.opp_pipcount = self._pipCount()
+                    print('new pip counts:', self.team_pipcount, self.opp_pipcount)
+        
             
-        #adjust user and opponent pip counts only if our flag to perform calculation is True
-        if pipcount is True:
-            #only perform calculation on last move to prevent unneccessary pip calculations
-            if (self._dice_1, self._dice_2, self._dice_3, self._dice_4) == (None, None, None, None) or self.is_forced_move is True:
-                self.team_pipcount, self.opp_pipcount = self.pipCount()
-                print('new pip counts:', self.team_pipcount, self.opp_pipcount)
-        
-        #when movePiece is called recursively or called to programmatically move a piece, it just returns  
-        if dice is None:
-            return   
-         
-        #store player's move into our instance variable for _undo method to use
-        self._last_move.append((t,f,dice_state,barPieces)) 
-        
-        #iterate through bar pieces and count our team pieces currently on the bar
-        bar_count = 0 
-        if f == 26:   
-            for p, c in self._piece_locations[26]:
-                if c == self._team:
-                    bar_count += 1  
-        
-        
-        if highlight is True: 
-            self._highlightSpot(f, bar_count)
+            #when movePiece is called recursively or called to programmatically move a piece, it just returns  
+            if d is None: 
+                if to != 26:
+                    #alert client application that an opponent move has been performed
+                    with self.game_lock:
+                        self.game_lock.notify()
+                
+                self.active_thread = False
+                with self.board_lock:
+                    self.board_lock.notify()
+                        
+                return   
             
-        if self._dice_1 is None and self._dice_2 is None and self._dice_3 is None and self._dice_4 is None:
-            self._confirm()
+            print('d:', d)
+            print(self._dice_1, self._dice_2, self._dice_3, self._dice_4)
+            #store player's move into our instance variable for _undo method to use
+            self._last_move.append((to,fr,dice_state,bar)) 
+            
+            #iterate through bar pieces and count our team pieces currently on the bar to pass to _highlightSpot
+            bar_count = 0 
+            if fr == 26:   
+                for p, c in self._piece_locations[26]:
+                    if c == self._team:
+                        bar_count += 1  
+            
+            
+            if high is True:
+                #give some time before calling highlightSpot to allow our mutations to take effect (avoid race conditions between threads)
+                self._highlightSpot(fr, bar_count)
+                
+            if self._dice_1 is None and self._dice_2 is None and self._dice_3 is None and self._dice_4 is None:
+                self._confirm()
+                
+            self.active_thread = False       
+            with self.board_lock:
+                self.board_lock.notify()
+            return
+                    
+        #will need to actually call addPiece, addToTrough, etc, here instead of movePiece or some variation of this solution
+        if self._animate is True:
+            draw_thread = threading.Thread(target=doMove)
+            draw_thread.daemon = False
+            draw_thread.start()
+        else:
+            doMove()
+            
             
     #return True if game is over        
     def isGameOver(self):
@@ -1363,24 +1471,41 @@ class BackgammonBoard(Canvas):
         else:
             return False
         
-    #check to see if player has been gammoned or backgammoned
-    #assumes client who calls this is the losing player
+    #check to see if a player has been gammoned or backgammoned
     #will return 1, 2, or 3 if no gammon, gammon, or backgammon, respectively (multiplier)
     def isGammon(self):
-        #should not factor in a gammon calculation if game ends as the result of a doubling proposal
         br_trough = len(self._piece_locations[0]) 
         bl_trough = len(self._piece_locations[25])
+        #should not factor in a gammon calculation if game ends as the result of a doubling proposal
         if br_trough != 15 and bl_trough != 15:
             return 1
+        bl_color = self._team if self._homeboard == 'bl' else self._opponent
+        br_color = self._team if self._homeboard == 'br' else self._opponent
         #if we get to this point, an entire game has been played out and the gammon calcaultion will execute
         if br_trough == 0 or bl_trough == 0:
-            for i in range(19,25) if self._homeboard == 'br' else range(1,7):
-                if len(self._piece_locations[i]) > 0 and self._piece_locations[i][0][1] == self._team:
+            losing_team = bl_color if bl_trough == 0 else br_color
+            for i in range(19,25) if br_trough == 0 else range(1,7):
+                if len(self._piece_locations[i]) > 0 and self._piece_locations[i][0][1] == losing_team:
                     return 3
                 
             return 2
         else:
             return 1
+        
+    #detirmine if a race is active on our board   
+    def is_racing(self):
+        #race is not on if any pieces are on the bar
+        if len(self._piece_locations[26]) > 0:
+            return False
+        #if we find any of our pieces past an enemy piece, is not race, otherwise it is a race
+        found_enemy = False
+        for i in range(1,25) if self._homeboard == 'br' else range(24,0,-1):
+            if found_enemy is False and len(self._piece_locations[i]) > 0 and self._piece_locations[i][0][1] == self._opponent:
+                found_enemy = True
+            elif found_enemy is True and len(self._piece_locations[i]) > 0 and self._piece_locations[i][0][1] == self._team:
+                return False
+            
+        return True
             
         
     #set dice to every possible number and if every iteration results in a 0 move forced move, then will return False, otherwise True
@@ -1399,8 +1524,112 @@ class BackgammonBoard(Canvas):
         print('canRoll:', can_roll)   
         return can_roll 
     
+    #animate a piece going from one index to another
+    def _animateMove(self, f, t, pc=None, hl=True):
+        try:
+            self.bind('<3>', lambda e:print('do nothing callback'))
+            self.configure(state='disabled')
+            #find first and last coordinates of piece in the animation 
+            start_coord = None
+            end_coord = None
+            #if we find a piece to move to bar, insert into our _piece_locations list at the beginning to make animation look right
+            bar_cond = False
+            pcolor = self._removePiece(f, color=pc)
+            for i in range(0,2):
+                chosen_idx = f if i == 0 else t
+                piece_count = len(self._piece_locations[chosen_idx])
+                p_coord = None
+                operation = None
+                if chosen_idx > 0 and chosen_idx < 25:
+                    coords = self._coords[chosen_idx-1]
+                    piece_count = piece_count if piece_count < 6 else 5
+                    #when we move a piece to an opposing player's blot
+                    if piece_count == 1 and chosen_idx == t and self._piece_locations[chosen_idx][0][1] != pcolor:
+                        bar_cond = True
+                        piece_count = 0
+                    #drawing coordinates depend on which side user's homeboard is on and how many pieces are located at that spot
+                    if self._homeboard == 'br':
+                        p_coord = (coords[0], coords[1]-(self._diameter*piece_count), coords[2], coords[3]-self._diameter-(self._diameter*piece_count)) if chosen_idx < 13 else \
+                                      (coords[0], coords[1]+(self._diameter*piece_count), coords[2], coords[3]+self._diameter+(self._diameter*piece_count))
+                    elif self._homeboard == 'bl':
+                        p_coord = (coords[0], coords[1]-(self._diameter*piece_count), coords[2], coords[3]-self._diameter-(self._diameter*piece_count)) if chosen_idx >= 13 else \
+                                      (coords[0], coords[1]+(self._diameter*piece_count), coords[2], coords[3]+self._diameter+(self._diameter*piece_count))
+                    operation = 'addPiece'
+                elif chosen_idx == 26:
+                    TEAM_PIECES = 0
+                    for p, c in self._piece_locations[26]:
+                        if c == self._team:
+                            TEAM_PIECES += 1
+                       
+                    OPP_PIECES = len(self._piece_locations[26]) - TEAM_PIECES 
+                    X_COORD = float(self['width'])/2
+                    Y_COORD = float(self['height'])/2
+                    DIAMETER = self._diameter
+                    p_coord = ((X_COORD-(DIAMETER//2)), (Y_COORD+(DIAMETER*OPP_PIECES)) if pcolor == self._opponent else \
+                                  (Y_COORD-(DIAMETER*TEAM_PIECES)), (X_COORD+(DIAMETER//2)), (Y_COORD+(DIAMETER*OPP_PIECES))+DIAMETER if pcolor == self._opponent  else \
+                                  (Y_COORD-(DIAMETER*TEAM_PIECES))-DIAMETER)
+                    operation = 'moveToBar'
+                else:
+                    width = float(self['width'])
+                    height = float(self['height'])
+                    piece_diameter = self._diameter
+                    piece_height = height*0.023 
+                    x_start1 = self._coords[11][0]-self._trough_distance
+                    x_start2 = self._coords[0][0]-self._trough_distance
+                    if self._homeboard == 'br' and pcolor == self._team:
+                        X_COORD = width-self._trough_distance+x_start1
+                        Y_COORD = height-x_start1-(piece_count*piece_height)
+                        p_coord = (X_COORD, Y_COORD, X_COORD+piece_diameter, Y_COORD-piece_height)
+                    elif self._homeboard == 'br' and pcolor == self._opponent:
+                        X_COORD = width-self._trough_distance+x_start1
+                        Y_COORD = x_start1+(piece_count*piece_height)
+                        p_coord = (X_COORD, Y_COORD, X_COORD+piece_diameter, Y_COORD+piece_height)
+                    elif self._homeboard == 'bl' and pcolor == self._team:
+                        X_COORD = x_start2
+                        Y_COORD = height-x_start2-(piece_count*piece_height)
+                        p_coord = (X_COORD, Y_COORD, X_COORD+piece_diameter, Y_COORD-piece_height)
+                    elif self._homeboard == 'bl' and pcolor == self._opponent:
+                        X_COORD = x_start2
+                        Y_COORD = x_start2+(piece_count*piece_height)
+                        p_coord = (X_COORD, Y_COORD, X_COORD+piece_diameter, Y_COORD+piece_height)
+                    operation = 'moveToTrough'
+                                  
+                if chosen_idx == f:
+                    start_coord = list(p_coord)
+                else:
+                    end_coord = p_coord
+            
+            #calculate distance between start and end of both lines and use a formula to deduce the coordinates at each point of line in the animation
+            l1_x2, l1_x1, l1_y2, l1_y1 = end_coord[0], start_coord[0], end_coord[1], start_coord[1]
+            l2_x2, l2_x1, l2_y2, l2_y1 = end_coord[2], start_coord[2], end_coord[3], start_coord[3]
+            d1 = math.sqrt((l1_x2 - l1_x1)**2 + (l1_y2 - l1_y1)**2)
+            d2 = math.sqrt((l2_x2 - l2_x1)**2 + (l2_y2 - l2_y1)**2)
+            larger_distance = d1 if d1 > d2 else d2 
+            traversed_dist = 0
+            while(traversed_dist < larger_distance):
+                l1_new_x = l1_x1 - ((traversed_dist*(l1_x1-l1_x2))/d1)
+                l1_new_y = l1_y1 - ((traversed_dist*(l1_y1-l1_y2))/d1)
+                l2_new_x = l2_x1 - ((traversed_dist*(l2_x1-l2_x2))/d1)
+                l2_new_y = l2_y1 - ((traversed_dist*(l2_y1-l2_y2))/d1) 
+                self.delete('animation')
+                self.create_oval(l1_new_x, l1_new_y, l2_new_x, l2_new_y, fill=pcolor, outline='black', tags=('animation'))
+                sleep(0.035)
+                traversed_dist += 30
+            
+                   
+            self.delete('animation')
+            self.configure(state='normal')
+            self.bind('<3>', lambda e: self._undo())
+            return operation, piece_count, bar_cond, end_coord
+        except Exception as ce:
+            print(type(ce))
+            print(traceback.format_exc())
+            sys.exit(0)
+         
+        
+    
     #return pip count as a tuple representing team and opponent pip counts, respectively
-    def pipCount(self):
+    def _pipCount(self):
         pips_team = 0
         pips_opp = 0
         #check bar pieces first
@@ -1426,7 +1655,6 @@ class BackgammonBoard(Canvas):
         return str(pips_team), str(pips_opp)
              
     #this method will be called when player clicks on doubling cube in correct position
-    #ideally this will somehow alert client application, which will alert the server that a player wishes to double
     def _wantsToDouble(self):
         print('here at _wantsToDouble()')
         print(self._dice_1, self._dice_2, self._dice_3, self._dice_4)
@@ -1439,20 +1667,27 @@ class BackgammonBoard(Canvas):
     
     #if user right-clicks on the board, this method will be called and will undo previous move 
     def _undo(self):
+        self._clearSpots()
         self.button.state(['disabled'])
         if len(self._last_move) > 0:
             prev = self._last_move.pop()
-            #move last piece moved back to it's original place
-            self.movePiece(*prev[0:2], pipcount=False)
-            #move any opponent pieces that were taken to the bar back to their original places
-            if prev[3] is not None:
-                for idx in prev[3]:
-                    if (idx >= prev[0] and self._homeboard == 'br') or (idx <= prev[0] and self._homeboard == 'bl'):
-                        if idx != -1:
-                            self.movePiece(26,idx, col=self._opponent, pipcount=False)
-                    
             #restore dice data back to previous state
             self._dice_1, self._dice_2, self._dice_3, self._dice_4 = prev[2]
+            print('undo move:', prev)
+             #move last piece moved back to it's original place
+            #for non-animation mode, this move must be done first or barPieces suite will try to send it to bar with movePiece call!!
+            self.movePiece(*prev[0:2], pipcount=False, highlight=False)    
+            #move any opponent pieces that were taken to the bar back to their original places
+            if prev[3] is not None:
+                loop_count = 0
+                for idx in prev[3]:
+                    loop_count += 1
+                    print('iter in _undo:', loop_count)
+                    if idx != -1:
+                        self.movePiece(26,idx,col=self._opponent,pipcount=False,highlight=False, barAnalysis=False)
+                        
+                            
+    
     
     #forced move has been detected, enable client's forced move button and disable the whole Backgammon board object      
     def _forcedMove(self):
@@ -1471,69 +1706,6 @@ class BackgammonBoard(Canvas):
     def confirm(self):
         self._last_move.clear()
         self.forced_moves.clear()
+        self.before_potentials.clear()
         
     
-if __name__ == '__main__':                  
-                   
-    root = Tk()
-    
-    w = Toplevel(root)
-    mock_button = ttk.Button(root, text="mock")
-    mb2 = ttk.Button(root, text='mock')
-    mock_meth = lambda *args: print('mock method')
-    canvas = BackgammonBoard(root, ('forest green', 'blue', 'red', 'pink', 'purple', 'black', 'black'), mock_button, mb2, mock_meth)
-    canvas2= BackgammonBoard(w, ('gray75', 'blue', 'red', 'pink', 'purple', 'black', 'black'), mock_button, mb2, mock_meth)
-    canvas.grid(column=0, row=0, sticky=(N,E,S,W))
-    canvas2.grid(column=0, row=0, sticky=(N,E,S,W))
-    canvas.setUpGame('br')
-    canvas2.setUpGame('bl')
-    
-    canvas.redrawCube('opp')
-    canvas2.redrawCube('team')
-    
-    TEAM1 = canvas._team
-    TEAM2 = canvas2._team
-    
-    canvas.movePiece(19,20,2)
-    canvas.movePiece(17,21,2)
-    canvas.movePiece(1,22,2)
-    canvas.movePiece(12,23,2)
-    canvas.movePiece(24,6,2)
-    
-    canvas.movePiece(6,26,2)
-    canvas.setDice(1,5)
-    print('pip count for us:', canvas.pipCount())
-    
-
-    canvas2.movePiece(19,25,5)
-    canvas2.movePiece(24,6,2)
-    canvas2.movePiece(17,25,3)
-    canvas2.movePiece(12,25,5)
-    canvas2.movePiece(1,24)
-    canvas2.movePiece(1,25)
-    
-    canvas2.movePiece(8,4,2)
-    canvas2.movePiece(13,3,2)
-    
-    canvas2.movePiece(13,1)
-    canvas2.movePiece(8,1)
-    canvas2.movePiece(24,15)
-    canvas2.movePiece(25,22)
-    canvas2.movePiece(25,12)
-    canvas2.movePiece(6,24,2)
-    canvas2.movePiece(13,6,2)
-    canvas2.movePiece(6,16,2)
-    canvas2.movePiece(6,21,2)
-    canvas2.setDice(5,4)
-    print('pip count for us:', canvas2.pipCount())
-    
-    
-    canvas.changeColor(4, 'purple')
-    canvas.changeColor(3, 'green')
-    canvas2.changeColor(0, 'purple')
-    canvas2.changeColor(1, 'green')
-    canvas2.changeColor(3, 'orange')
-    canvas2.changeColor(4,'white')
-    
-    
-    root.mainloop()
