@@ -29,7 +29,7 @@ show every possibly place that piece can move with the current dice data, and a 
 If a move is "forced", meaning there is only one way to perform a move with a certain roll, the 'Do Forced Move' button will enable itself and the client
 must click this button to proceed.  
 
-The AI works by looking at every possible move they can make, deciding on a move based upon which Strategy it is composed with at that time, such as NormalStrategy, AggressiveStrategy, and SafeStrategy.
+The AI works by looking at every possible move they can make, deciding on a move based upon which Strategy it is composed with, such as NormalStrategy, AggressiveStrategy, and SafeStrategy.
 The data the AI works with is dynamically generated before every move it makes.  It will likely surprise you with it's outside of the box "thinking"!
 
 <!-- FUTURE -->
