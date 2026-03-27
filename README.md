@@ -4,11 +4,11 @@
 
 [![Devin's Backgammon Game][product-screenshot]](https://www.flickr.com/photos/199587573@N06/53344540746/in/dateposted-public/lightbox/)
 
-This is a fully functional, tournament style Backgammon game in which two clients can connect and play.
+This is a fully functional, tournament style Backgammon game where the user takes on a sophisticated AI backgammon program.
 Complete with flawless forced move detection and a simple, yet appealing interface, this is one of the best ways to play online backgammon.
 Any backgammon fan could appreciate playing this one and is simple and inviting enough for newbies!
-The newest addition to this project is a computer player the user can play against.
-This project is written in Python.
+
+This is the beta release.  Not representative of final product.
 
 ### Built With
 This project uses a GUI framework known as Tkinter, which is built-in to Python and compatiable with all major operating systems.
@@ -18,26 +18,7 @@ This project uses a GUI framework known as Tkinter, which is built-in to Python 
 <!-- GETTING STARTED -->
 ## Getting Started
 
-You can easily see how this project works by starting the server script and subsequently starting the client applications, all from the command line.
-These files implement the server to work as a local host, but this can easily be changed by hardcoding an IP address into server and socket instantiations.
-Only one third-party Python module is used (screeninfo), which is can easily be added to newer Python installations.  Alternatively, no server is needed
-to play against the computer in one-player mode, in which case firing up gammonclient.py is all that is needed to play.
-
-This project assumes the client has Python on their machine and can use 'pip' calls to download official third-party modules.
-As of right now, the server script really just represents a 'room' i.e. two players playing one session.  As this project grows, these 'rooms' could be the building blocks for a full-scale backgammon service.
-
-### Installation
-
-1. Make sure Python is installed on your machine.
-   
-2. Download screeninfo module (if not already downloaded) by typing in the following on the command line:
-```sh
-pip screeninfo
-```
-   You will be notified of a successful installation.
-
-3. Place all four of my python files(client application, board module, computer player, and server application) in a directory that Python recognizes, and run server and subsequent clients as scripts on the command line.
-
+This backgammon game can be played through an executable file, which can be downloaded from this GitHub page.
 
 
 <!-- ROADMAP -->
